@@ -41,6 +41,7 @@ async function main() {
         console.error('❌ Could not find the "Read" (print/physical) reading format. Formats seen:', formatsData.reading_formats);
         process.exit(1);
     }
+    const ebookFormat = formatsData.reading_formats.find(f => f.format.toLowerCase() === 'ebook');
     console.log(`Reading formats in your account: ${formatsData.reading_formats.map(f => `${f.id}=${f.format}`).join(', ')}`);
     console.log(`Treating "${physicalFormat.format}" (id ${physicalFormat.id}) as physical.\n`);
 
@@ -51,7 +52,12 @@ async function main() {
                     id
                     edition_id
                     edition { id reading_format_id }
-                    book { id title default_ebook_edition_id }
+                    book {
+                        id
+                        title
+                        default_ebook_edition_id
+                        editions { id reading_format_id users_count }
+                    }
                 }
             }
         }
@@ -69,7 +75,14 @@ async function main() {
 
     for (const ub of physicalBooks) {
         const title = ub.book?.title || `book_id ${ub.book?.id}`;
-        const targetEditionId = ub.book?.default_ebook_edition_id;
+
+        // The book's default ebook edition, or failing that, any cataloged ebook
+        // edition (not just the one Hardcover marks as default), preferring the
+        // one with the most readers.
+        const altEbookEditions = (ub.book?.editions || [])
+            .filter(e => e.reading_format_id === ebookFormat?.id)
+            .sort((a, b) => (b.users_count || 0) - (a.users_count || 0));
+        const targetEditionId = ub.book?.default_ebook_edition_id || altEbookEditions[0]?.id;
 
         if (!targetEditionId) {
             console.log(`[Skip] '${title}' — no ebook edition found in Hardcover's catalog for this book.`);
