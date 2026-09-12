@@ -4,19 +4,45 @@ import dotenv from 'dotenv';
 // Load .env
 dotenv.config();
 
+// Each shelf reads its RSS URL from its own env var and syncs to a different
+// place in Hardcover: a status (Want to Read / Read) or a named list.
+const SHELF_CONFIGS = {
+    read: {
+        envVar: 'GOODREADS_RSS_URL',
+        target: { type: 'status', statusId: 3, trackReadDate: true }
+    },
+    toread: {
+        envVar: 'GOODREADS_RSS_URL_TOREAD',
+        target: { type: 'status', statusId: 1, trackReadDate: false }
+    },
+    bookclub: {
+        envVar: 'GOODREADS_RSS_URL_BOOKCLUB',
+        target: { type: 'list', listSlug: 'book-club' }
+    }
+};
+
 /**
  * Main Entry Point for Node.js
  */
 async function main() {
     console.log("=== Kindle Sync (Node.js) ===");
-    
+
     // 1. Get Config
-    const RSS_URL = process.env.GOODREADS_RSS_URL;
+    const shelfArgIndex = process.argv.indexOf('--shelf');
+    const shelfKey = shelfArgIndex > -1 ? process.argv[shelfArgIndex + 1] : 'read';
+    const config = SHELF_CONFIGS[shelfKey];
+
+    if (!config) {
+        console.error(`❌ Unknown --shelf '${shelfKey}'. Valid options: ${Object.keys(SHELF_CONFIGS).join(', ')}`);
+        process.exit(1);
+    }
+
+    const RSS_URL = process.env[config.envVar];
     const HC_TOKEN = process.env.HARDCOVER_API_TOKEN;
     const DRY_RUN = process.env.DRY_RUN === 'true' || process.argv.includes('--dry-run');
 
     if (!RSS_URL || !HC_TOKEN) {
-        console.error("❌ Stats: Missing Configuration. Please set GOODREADS_RSS_URL and HARDCOVER_API_TOKEN.");
+        console.error(`❌ Stats: Missing Configuration. Please set ${config.envVar} and HARDCOVER_API_TOKEN.`);
         process.exit(1);
     }
 
@@ -30,6 +56,7 @@ async function main() {
         rssUrl: RSS_URL,
         isDryRun: DRY_RUN,
         limit: LIMIT,
+        target: config.target,
         onLog: (msg, type) => {
             // We can colorize output here if we want terminal colors
             // For now, pure log is fine
