@@ -30,7 +30,7 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    - name: Run Sync Script
+    - name: Sync Read Shelf
       env:
         GOODREADS_RSS_URL: ${{ secrets.GOODREADS_RSS_URL }}
         HARDCOVER_API_TOKEN: ${{ secrets.HARDCOVER_API_TOKEN }}
@@ -38,4 +38,22 @@ jobs:
         LIMIT="${{ inputs.limit }}"
         if [ -z "$LIMIT" ]; then LIMIT="10"; fi
         # Node script accepts --limit. 0 means all.
-        npm run sync -- --limit $LIMIT
+        npm run sync -- --shelf read --limit $LIMIT
+
+    - name: Sync Want to Read Shelf
+      env:
+        GOODREADS_RSS_URL_TOREAD: ${{ secrets.GOODREADS_RSS_URL_TOREAD }}
+        HARDCOVER_API_TOKEN: ${{ secrets.HARDCOVER_API_TOKEN }}
+      run: |
+        LIMIT="${{ inputs.limit }}"
+        if [ -z "$LIMIT" ]; then LIMIT="10"; fi
+        npm run sync -- --shelf toread --limit $LIMIT
+
+    - name: Sync Book Club Shelf
+      env:
+        GOODREADS_RSS_URL_BOOKCLUB: ${{ secrets.GOODREADS_RSS_URL_BOOKCLUB }}
+        HARDCOVER_API_TOKEN: ${{ secrets.HARDCOVER_API_TOKEN }}
+      run: |
+        LIMIT="${{ inputs.limit }}"
+        if [ -z "$LIMIT" ]; then LIMIT="10"; fi
+        npm run sync -- --shelf bookclub --limit $LIMIT
