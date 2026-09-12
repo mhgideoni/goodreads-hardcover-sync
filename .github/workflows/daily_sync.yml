@@ -80,6 +80,7 @@ jobs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
+        mkdir -p .sync-state
         git add .sync-state
         git diff --cached --quiet || git commit -m "Update sync state [skip ci]"
         git push
