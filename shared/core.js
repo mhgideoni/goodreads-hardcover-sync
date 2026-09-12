@@ -104,8 +104,13 @@ export const Utils = {
     }
 };
 
+// Safety valve for the removal pass: if more than this many previously-synced
+// books look like they vanished from the Goodreads feed at once, skip all
+// removals for the run rather than risk mass-deleting on a bad/empty fetch.
+const MAX_REMOVALS_PER_RUN = 5;
+
 export class SyncEngine {
-    constructor({ hcToken, rssUrl, isDryRun = false, limit = 20, onLog = () => {}, target = { type: 'status', statusId: 3, trackReadDate: true } }) {
+    constructor({ hcToken, rssUrl, isDryRun = false, limit = 20, onLog = () => {}, target = { type: 'status', statusId: 3, trackReadDate: true }, previousState = {} }) {
         this.hcToken = hcToken;
         this.rssUrl = rssUrl;
         this.isDryRun = isDryRun;
@@ -113,10 +118,12 @@ export class SyncEngine {
         this.onLog = onLog;
         this.target = target;
         this.listId = null;
+        this.previousState = previousState || {};
         this.hcEndpoint = "https://api.hardcover.app/v1/graphql";
         this.results = {
             newBooks: 0,
             added: [],
+            removed: [],
             errors: []
         };
     }
@@ -145,6 +152,10 @@ export class SyncEngine {
                 this.log("No entries found in RSS.", "warn");
                 return this.results;
             }
+
+            // State carried forward across runs, used to detect removals.
+            // Only books this engine itself added (present here) are ever removal candidates.
+            const newState = { ...this.previousState };
 
             // 2. Resolve List (if targeting a Hardcover list instead of a status)
             if (this.target.type === 'list' && !this.listId) {
@@ -224,19 +235,24 @@ export class SyncEngine {
                 // REAL RUN
                 if (this.target.type === 'list') {
                     try {
-                        const added = await this.addBookToList(bookId, this.listId);
-                        if (added) {
+                        const listBookRowId = await this.addBookToList(bookId, this.listId);
+                        if (listBookRowId) {
                             bookIds.add(bookId);
                             this.results.newBooks++;
                             this.results.added.push({ title: entry.title, id: bookId });
                             this.log(`✅ Added to list: ${entry.title}`, 'success');
+                            if (entry.book_id) newState[entry.book_id] = { hardcoverRowId: listBookRowId, title: entry.title };
                         } else {
                             this.log(`❌ Failed to add to list: ${entry.title}`, 'error');
                             this.results.errors.push(entry.title);
                         }
                     } catch (e) {
-                        this.log(`❌ Error adding '${entry.title}' to list: ${e.message}`, 'error');
-                        this.results.errors.push(`${entry.title} (${e.message})`);
+                        if (this.isDuplicateError(e.message)) {
+                            this.log(`[Skip] '${entry.title}' already in this list.`, 'debug');
+                        } else {
+                            this.log(`❌ Error adding '${entry.title}' to list: ${e.message}`, 'error');
+                            this.results.errors.push(`${entry.title} (${e.message})`);
+                        }
                     }
 
                     // Rate Limit
@@ -245,12 +261,14 @@ export class SyncEngine {
                 }
 
                 try {
-                    const userBookId = await this.addUserBook(bookId, this.target.statusId, entry.user_rating);
+                    const addResult = await this.addUserBook(bookId, this.target.statusId, entry.user_rating);
+                    const userBookId = addResult.id;
                     if (userBookId) {
                         bookIds.add(bookId);
                         this.results.newBooks++;
                         this.results.added.push({ title: entry.title, id: bookId });
                         this.log(`✅ Added: ${entry.title}`, 'success');
+                        if (entry.book_id) newState[entry.book_id] = { hardcoverRowId: userBookId, title: entry.title };
 
                         if (this.target.trackReadDate) {
                             // Handle Date
@@ -293,6 +311,9 @@ export class SyncEngine {
                                 this.log(`No date found for '${entry.title}' (read_at and date_added both empty)`, 'warn');
                             }
                         }
+                    } else if (addResult.duplicate) {
+                        // Already in the library under some other status — not a failure, just nothing to do.
+                        this.log(`[Skip] '${entry.title}' already in your Hardcover library under another status.`, 'debug');
                     } else {
                         this.log(`❌ Failed to add: ${entry.title}`, 'error');
                         this.results.errors.push(entry.title);
@@ -306,6 +327,40 @@ export class SyncEngine {
                 await new Promise(r => setTimeout(r, 2000));
             }
 
+            // 4. Removal Pass
+            // Only books this engine previously added (tracked in newState) are ever
+            // removal candidates, and only when they're truly gone from the current
+            // feed — guarded against a bad/empty fetch by the cap below.
+            const liveGoodreadsIds = new Set(entries.map(e => e.book_id).filter(Boolean));
+            const staleEntries = Object.entries(newState).filter(([grId]) => !liveGoodreadsIds.has(grId));
+
+            if (staleEntries.length > MAX_REMOVALS_PER_RUN) {
+                this.log(`⚠️ ${staleEntries.length} previously-synced books are missing from the Goodreads feed — above the safety cap of ${MAX_REMOVALS_PER_RUN}. Skipping all removals this run. Check your Goodreads shelf and Hardcover ${this.target.type === 'list' ? 'list' : 'library'} manually.`, 'warn');
+            } else {
+                for (const [grId, record] of staleEntries) {
+                    if (this.isDryRun) {
+                        this.log(`[Dry Run] Would remove '${record.title}' (no longer on Goodreads shelf)`, 'info');
+                        this.results.removed.push(record.title);
+                        continue;
+                    }
+                    try {
+                        if (this.target.type === 'list') {
+                            await this.graphqlQuery(`mutation DeleteListBook($id: Int!) { delete_list_book(id: $id) { id } }`, { id: record.hardcoverRowId });
+                        } else {
+                            await this.graphqlQuery(`mutation DeleteUserBook($id: Int!) { delete_user_book(id: $id) { id } }`, { id: record.hardcoverRowId });
+                        }
+                        this.log(`🗑️ Removed '${record.title}' (no longer on Goodreads shelf)`, 'success');
+                        this.results.removed.push(record.title);
+                        delete newState[grId];
+                    } catch (e) {
+                        this.log(`❌ Error removing '${record.title}': ${e.message}`, 'error');
+                        this.results.errors.push(`Remove: ${record.title} (${e.message})`);
+                    }
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+            }
+
+            this.results.state = newState;
             return this.results;
 
         } catch (e) {
@@ -433,26 +488,35 @@ export class SyncEngine {
     }
 
     async addUserBook(bookId, statusId, rating) {
+        // Goodreads represents "unrated" as the string "0", which parseInt would
+        // otherwise pass through as 0 — but Hardcover requires ratings >= 0.5.
+        const parsedRating = parseInt(rating, 10);
+        const validRating = (!isNaN(parsedRating) && parsedRating > 0) ? parsedRating : null;
+
         const mutation = `mutation AddUserBook($book_id: Int!, $status_id: Int!, $rating: numeric) { insert_user_book(object: { book_id: $book_id, status_id: $status_id, rating: $rating }) { id error } }`;
-        const res = await this.graphqlQuery(mutation, { book_id: bookId, status_id: statusId, rating: rating ? parseInt(rating) : null });
+        const res = await this.graphqlQuery(mutation, { book_id: bookId, status_id: statusId, rating: validRating });
 
         const data = res.data.insert_user_book;
         if (data && data.error) {
-             if (data.error.includes("Uniqueness violation")) {
+             if (this.isDuplicateError(data.error)) {
                  this.log(`[Duplicate] Book ID ${bookId} already in library (API).`, 'warn');
-             } else {
-                 this.log(`[API Error] Failed to add book ${bookId}: ${data.error}`, 'error');
+                 return { id: null, duplicate: true };
              }
-             return null;
+             this.log(`[API Error] Failed to add book ${bookId}: ${data.error}`, 'error');
+             return { id: null, duplicate: false };
         }
 
-        return data?.id;
+        return { id: data?.id, duplicate: false };
+    }
+
+    isDuplicateError(message) {
+        return typeof message === 'string' && message.toLowerCase().includes('uniqueness violation');
     }
 
     async addBookToList(bookId, listId) {
         const mutation = `mutation AddListBook($book_id: Int!, $list_id: Int!) { insert_list_book(object: { book_id: $book_id, list_id: $list_id }) { id } }`;
         const res = await this.graphqlQuery(mutation, { book_id: bookId, list_id: listId });
-        return !!res.data.insert_list_book?.id;
+        return res.data.insert_list_book?.id ?? null;
     }
 
     async addReadDate(userBookId, finishedAt) {

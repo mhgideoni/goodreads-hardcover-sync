@@ -1,8 +1,31 @@
 import { SyncEngine } from '../shared/core.js';
 import dotenv from 'dotenv';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // Load .env
 dotenv.config();
+
+const STATE_DIR = path.join(process.cwd(), '.sync-state');
+
+function loadState(shelfKey) {
+    const file = path.join(STATE_DIR, `${shelfKey}.json`);
+    try {
+        if (fs.existsSync(file)) {
+            return JSON.parse(fs.readFileSync(file, 'utf-8'));
+        }
+    } catch (e) {
+        console.warn(`⚠️ Could not read state file ${file}, starting fresh: ${e.message}`);
+    }
+    return {};
+}
+
+function saveState(shelfKey, state) {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    const file = path.join(STATE_DIR, `${shelfKey}.json`);
+    fs.writeFileSync(file, JSON.stringify(state, null, 2));
+    return file;
+}
 
 // Each shelf reads its RSS URL from its own env var and syncs to a different
 // place in Hardcover: a status (Want to Read / Read) or a named list.
@@ -51,12 +74,14 @@ async function main() {
     const LIMIT = limitArgIndex > -1 ? parseInt(process.argv[limitArgIndex + 1]) : 20;
 
     // 2. Initialize Engine
+    const previousState = loadState(shelfKey);
     const engine = new SyncEngine({
         hcToken: HC_TOKEN,
         rssUrl: RSS_URL,
         isDryRun: DRY_RUN,
         limit: LIMIT,
         target: config.target,
+        previousState,
         onLog: (msg, type) => {
             // We can colorize output here if we want terminal colors
             // For now, pure log is fine
@@ -71,6 +96,14 @@ async function main() {
         console.log(`New Books Added: ${results.newBooks}`);
         if(results.added.length > 0) {
             results.added.forEach(b => console.log(` - ${b.title} (ID: ${b.id})`));
+        }
+        if(results.removed && results.removed.length > 0) {
+            console.log(`Books Removed: ${results.removed.length}`);
+            results.removed.forEach(t => console.log(` - ${t}`));
+        }
+        if (!DRY_RUN && results.state) {
+            const savedTo = saveState(shelfKey, results.state);
+            console.log(`State saved to ${savedTo}`);
         }
         if(results.errors.length > 0) {
              console.log("\nErrors encountered:");

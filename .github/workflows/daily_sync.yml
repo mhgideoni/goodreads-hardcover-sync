@@ -13,6 +13,14 @@ on:
         description: 'Number of books to check (0 for all)'
         required: false
         default: '10'
+      dry_run:
+        description: 'Preview only — do not add or remove anything'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
 
 jobs:
   sync_books:
@@ -31,29 +39,47 @@ jobs:
       run: npm install
 
     - name: Sync Read Shelf
+      continue-on-error: true
       env:
         GOODREADS_RSS_URL: ${{ secrets.GOODREADS_RSS_URL }}
         HARDCOVER_API_TOKEN: ${{ secrets.HARDCOVER_API_TOKEN }}
       run: |
         LIMIT="${{ inputs.limit }}"
         if [ -z "$LIMIT" ]; then LIMIT="10"; fi
+        DRY_RUN_FLAG=""
+        if [ "${{ inputs.dry_run }}" = "true" ]; then DRY_RUN_FLAG="--dry-run"; fi
         # Node script accepts --limit. 0 means all.
-        npm run sync -- --shelf read --limit $LIMIT
+        npm run sync -- --shelf read --limit $LIMIT $DRY_RUN_FLAG
 
     - name: Sync Want to Read Shelf
+      continue-on-error: true
       env:
         GOODREADS_RSS_URL_TOREAD: ${{ secrets.GOODREADS_RSS_URL_TOREAD }}
         HARDCOVER_API_TOKEN: ${{ secrets.HARDCOVER_API_TOKEN }}
       run: |
         LIMIT="${{ inputs.limit }}"
         if [ -z "$LIMIT" ]; then LIMIT="10"; fi
-        npm run sync -- --shelf toread --limit $LIMIT
+        DRY_RUN_FLAG=""
+        if [ "${{ inputs.dry_run }}" = "true" ]; then DRY_RUN_FLAG="--dry-run"; fi
+        npm run sync -- --shelf toread --limit $LIMIT $DRY_RUN_FLAG
 
     - name: Sync Book Club Shelf
+      continue-on-error: true
       env:
         GOODREADS_RSS_URL_BOOKCLUB: ${{ secrets.GOODREADS_RSS_URL_BOOKCLUB }}
         HARDCOVER_API_TOKEN: ${{ secrets.HARDCOVER_API_TOKEN }}
       run: |
         LIMIT="${{ inputs.limit }}"
         if [ -z "$LIMIT" ]; then LIMIT="10"; fi
-        npm run sync -- --shelf bookclub --limit $LIMIT
+        DRY_RUN_FLAG=""
+        if [ "${{ inputs.dry_run }}" = "true" ]; then DRY_RUN_FLAG="--dry-run"; fi
+        npm run sync -- --shelf bookclub --limit $LIMIT $DRY_RUN_FLAG
+
+    - name: Commit sync state
+      if: always()
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add .sync-state
+        git diff --cached --quiet || git commit -m "Update sync state [skip ci]"
+        git push
