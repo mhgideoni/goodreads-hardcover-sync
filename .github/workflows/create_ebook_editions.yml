@@ -1,0 +1,30 @@
+name: Create Missing Ebook Editions
+
+on:
+  workflow_dispatch:
+    inputs:
+      pilot:
+        description: 'Pilot mode - only create the first book, for verification'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  create_editions:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+    - run: npm install
+    - name: Create editions
+      env:
+        HARDCOVER_API_TOKEN: ${{ secrets.HARDCOVER_API_TOKEN }}
+      run: |
+        PILOT_FLAG=""
+        if [ "${{ inputs.pilot }}" = "true" ]; then PILOT_FLAG="--pilot"; fi
+        node scripts/create_ebook_editions.js $PILOT_FLAG
