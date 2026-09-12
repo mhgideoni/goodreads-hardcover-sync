@@ -6,6 +6,12 @@ const ENDPOINT = 'https://api.hardcover.app/v1/graphql';
 const HC_TOKEN = process.env.HARDCOVER_API_TOKEN;
 const DRY_RUN = !process.argv.includes('--live');
 
+// reading_format_id on editions does NOT reliably distinguish physical/ebook/audio —
+// verified live that Hardcover/Paperback/Kindle/Ebook/Audiobook editions can all carry
+// the same reading_format_id. The real signal is the free-text edition_format field.
+const isAudioFormat = (fmt) => /audio/i.test(fmt || '');
+const isEbookFormat = (fmt) => /ebook|kindle/i.test(fmt || '');
+
 async function gql(query, variables) {
     const authHeader = HC_TOKEN.startsWith('Bearer ') ? HC_TOKEN : `Bearer ${HC_TOKEN}`;
     const res = await fetch(ENDPOINT, {
@@ -31,32 +37,18 @@ async function main() {
 
     console.log(`=== Switch Read Books: Physical -> Ebook (${DRY_RUN ? 'DRY RUN — nothing will change' : 'LIVE'}) ===`);
 
-    // Resolve the physical-print reading_format id dynamically rather than hardcoding it,
-    // since Hardcover doesn't document these ids publicly. Hardcover's actual format set
-    // is Read / Listened / Both / Ebook — "Read" is the print/physical one (as opposed to
-    // "Listened" for audio), there's no format literally named "Physical".
-    const formatsData = await gql(`query { reading_formats { id format } }`);
-    const physicalFormat = formatsData.reading_formats.find(f => f.format.toLowerCase() === 'read');
-    if (!physicalFormat) {
-        console.error('❌ Could not find the "Read" (print/physical) reading format. Formats seen:', formatsData.reading_formats);
-        process.exit(1);
-    }
-    const ebookFormat = formatsData.reading_formats.find(f => f.format.toLowerCase() === 'ebook');
-    console.log(`Reading formats in your account: ${formatsData.reading_formats.map(f => `${f.id}=${f.format}`).join(', ')}`);
-    console.log(`Treating "${physicalFormat.format}" (id ${physicalFormat.id}) as physical.\n`);
-
     const query = `
         query MyReadBooks {
             me {
                 user_books(where: {status_id: {_eq: 3}}) {
                     id
                     edition_id
-                    edition { id reading_format_id }
+                    edition { id edition_format }
                     book {
                         id
                         title
                         default_ebook_edition_id
-                        editions { id reading_format_id users_count }
+                        editions { id edition_format users_count }
                     }
                 }
             }
@@ -66,8 +58,15 @@ async function main() {
     const userBooks = data.me?.[0]?.user_books || [];
     console.log(`Loaded ${userBooks.length} Read books.`);
 
-    const physicalBooks = userBooks.filter(ub => ub.edition && ub.edition.reading_format_id === physicalFormat.id);
-    console.log(`${physicalBooks.length} are currently on a physical edition.\n`);
+    const physicalBooks = userBooks.filter(ub => {
+        if (!ub.edition) return false;
+        const fmt = ub.edition.edition_format;
+        if (isAudioFormat(fmt)) return false; // never touch audiobooks
+        if (isEbookFormat(fmt)) return false; // already an ebook edition
+        if (ub.book?.default_ebook_edition_id && ub.edition_id === ub.book.default_ebook_edition_id) return false;
+        return true; // Hardcover, Paperback, or unlabeled — treated as physical/print
+    });
+    console.log(`${physicalBooks.length} are currently on a physical (non-ebook, non-audio) edition.\n`);
 
     let switched = 0;
     let skippedNoEbook = 0;
@@ -80,7 +79,7 @@ async function main() {
         // edition (not just the one Hardcover marks as default), preferring the
         // one with the most readers.
         const altEbookEditions = (ub.book?.editions || [])
-            .filter(e => e.reading_format_id === ebookFormat?.id)
+            .filter(e => isEbookFormat(e.edition_format))
             .sort((a, b) => (b.users_count || 0) - (a.users_count || 0));
         const targetEditionId = ub.book?.default_ebook_edition_id || altEbookEditions[0]?.id;
 
@@ -91,7 +90,7 @@ async function main() {
         }
 
         if (DRY_RUN) {
-            console.log(`[Dry Run] Would switch '${title}' from edition ${ub.edition_id} to ebook edition ${targetEditionId}`);
+            console.log(`[Dry Run] Would switch '${title}' from edition ${ub.edition_id} (format="${ub.edition.edition_format}") to ebook edition ${targetEditionId}`);
             continue;
         }
 
