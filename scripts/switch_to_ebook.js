@@ -31,12 +31,14 @@ async function main() {
 
     console.log(`=== Switch Read Books: Physical -> Ebook (${DRY_RUN ? 'DRY RUN — nothing will change' : 'LIVE'}) ===`);
 
-    // Resolve the "Physical" reading_format id dynamically rather than hardcoding it,
-    // since Hardcover doesn't document these ids publicly.
+    // Resolve the physical-print reading_format id dynamically rather than hardcoding it,
+    // since Hardcover doesn't document these ids publicly. Hardcover's actual format set
+    // is Read / Listened / Both / Ebook — "Read" is the print/physical one (as opposed to
+    // "Listened" for audio), there's no format literally named "Physical".
     const formatsData = await gql(`query { reading_formats { id format } }`);
-    const physicalFormat = formatsData.reading_formats.find(f => f.format.toLowerCase().includes('physical'));
+    const physicalFormat = formatsData.reading_formats.find(f => f.format.toLowerCase() === 'read');
     if (!physicalFormat) {
-        console.error('❌ Could not find a "Physical" reading format. Formats seen:', formatsData.reading_formats);
+        console.error('❌ Could not find the "Read" (print/physical) reading format. Formats seen:', formatsData.reading_formats);
         process.exit(1);
     }
     console.log(`Reading formats in your account: ${formatsData.reading_formats.map(f => `${f.id}=${f.format}`).join(', ')}`);
