@@ -55,10 +55,12 @@ async function main() {
     for (const b of list) {
         try {
             const result = await gql(
-                `mutation Upsert($book: CreateBookFromPlatformInput!) { upsert_book(book: $book) { id } }`,
+                `mutation Upsert($book: CreateBookFromPlatformInput!) { upsert_book(book: $book) { id status errors edition_id book { id title } } }`,
                 { book: { book_id: b.book_id, external_id: b.asin, platform_id: AMAZON_PLATFORM_ID } }
             );
-            console.log(`✅ '${b.title}' (book_id=${b.book_id}) -> ${JSON.stringify(result.upsert_book)}`);
+            const r = result.upsert_book;
+            const ok = !r.errors || r.errors.length === 0;
+            console.log(`${ok ? '✅' : '❌'} '${b.title}' (book_id=${b.book_id}) -> ${JSON.stringify(r)}`);
         } catch (e) {
             console.error(`❌ Failed for '${b.title}' (book_id=${b.book_id}): ${e.message}`);
         }
