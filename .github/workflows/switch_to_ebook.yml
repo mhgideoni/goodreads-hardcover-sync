@@ -1,0 +1,37 @@
+name: Switch Read Books to Ebook Format
+
+on:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: 'Actually make changes (unchecked = dry run preview only)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  switch_format:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v7
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Switch format
+      env:
+        HARDCOVER_API_TOKEN: ${{ secrets.HARDCOVER_API_TOKEN }}
+      run: |
+        LIVE_FLAG=""
+        if [ "${{ inputs.live }}" = "true" ]; then LIVE_FLAG="--live"; fi
+        node scripts/switch_to_ebook.js $LIVE_FLAG
