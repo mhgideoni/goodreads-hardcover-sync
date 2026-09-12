@@ -105,12 +105,14 @@ export const Utils = {
 };
 
 export class SyncEngine {
-    constructor({ hcToken, rssUrl, isDryRun = false, limit = 20, onLog = () => {} }) {
+    constructor({ hcToken, rssUrl, isDryRun = false, limit = 20, onLog = () => {}, target = { type: 'status', statusId: 3, trackReadDate: true } }) {
         this.hcToken = hcToken;
         this.rssUrl = rssUrl;
         this.isDryRun = isDryRun;
         this.limit = limit;
         this.onLog = onLog;
+        this.target = target;
+        this.listId = null;
         this.hcEndpoint = "https://api.hardcover.app/v1/graphql";
         this.results = {
             newBooks: 0,
@@ -144,9 +146,19 @@ export class SyncEngine {
                 return this.results;
             }
 
-            // 2. Fetch Library
+            // 2. Resolve List (if targeting a Hardcover list instead of a status)
+            if (this.target.type === 'list' && !this.listId) {
+                this.log(`Resolving Hardcover list '${this.target.listSlug}'...`, "info");
+                this.listId = await this.resolveListId(this.target.listSlug);
+                if (!this.listId) {
+                    this.log(`No Hardcover list with slug '${this.target.listSlug}' found. Create it in Hardcover first.`, "error");
+                    return this.results;
+                }
+            }
+
+            // 3. Fetch existing books at the target (status or list)
             this.log("Fetching Hardcover Library...", "info");
-            const { bookIds, existingIsbns, existingTitles } = await this.getHardcoverLibraryIds();
+            const { bookIds, existingIsbns, existingTitles } = await this.getExistingBookIds();
             this.log(`Library loaded. ${bookIds.size} books.`, "info");
 
             // 3. Compare
@@ -210,52 +222,76 @@ export class SyncEngine {
                 }
 
                 // REAL RUN
+                if (this.target.type === 'list') {
+                    try {
+                        const added = await this.addBookToList(bookId, this.listId);
+                        if (added) {
+                            bookIds.add(bookId);
+                            this.results.newBooks++;
+                            this.results.added.push({ title: entry.title, id: bookId });
+                            this.log(`✅ Added to list: ${entry.title}`, 'success');
+                        } else {
+                            this.log(`❌ Failed to add to list: ${entry.title}`, 'error');
+                            this.results.errors.push(entry.title);
+                        }
+                    } catch (e) {
+                        this.log(`❌ Error adding '${entry.title}' to list: ${e.message}`, 'error');
+                        this.results.errors.push(`${entry.title} (${e.message})`);
+                    }
+
+                    // Rate Limit
+                    await new Promise(r => setTimeout(r, 2000));
+                    continue;
+                }
+
                 try {
-                    const userBookId = await this.addBookToHardcover(bookId, entry.user_rating, entry.user_read_at);
+                    const userBookId = await this.addUserBook(bookId, this.target.statusId, entry.user_rating);
                     if (userBookId) {
                         bookIds.add(bookId);
                         this.results.newBooks++;
                         this.results.added.push({ title: entry.title, id: bookId });
                         this.log(`✅ Added: ${entry.title}`, 'success');
 
-                        // Handle Date
-                        // Logic: Prefer 'user_read_at'. Fallback to 'user_date_added' if missing.
-                        const rawDate = entry.user_read_at || entry.user_date_added;
-                        
-                        if (rawDate) {
-                            this.log(`Received Date: '${rawDate}' (Source: ${entry.user_read_at ? 'Read At' : 'Date Added'})`, 'debug');
-                            let dateStr = null;
-                            
-                            // Strategy 1: Try to capture "DD Mon YYYY" directly from standard RSS format
-                            // Example: "Sat, 20 Jan 2024..."
-                            const match = rawDate.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
-                            if (match) {
-                                const [_, day, monthStr, year] = match;
-                                // Convert Month "Jan" -> "01"
-                                const months = {Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12'};
-                                const month = months[monthStr];
-                                if (month) {
-                                    dateStr = `${year}-${month}-${day.padStart(2, '0')}`;
+                        if (this.target.trackReadDate) {
+                            // Handle Date
+                            // Logic: Prefer 'user_read_at'. Fallback to 'user_date_added' if missing.
+                            const rawDate = entry.user_read_at || entry.user_date_added;
+
+                            if (rawDate) {
+                                this.log(`Received Date: '${rawDate}' (Source: ${entry.user_read_at ? 'Read At' : 'Date Added'})`, 'debug');
+                                let dateStr = null;
+
+                                // Strategy 1: Try to capture "DD Mon YYYY" directly from standard RSS format
+                                // Example: "Sat, 20 Jan 2024..."
+                                const match = rawDate.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
+                                if (match) {
+                                    const [_, day, monthStr, year] = match;
+                                    // Convert Month "Jan" -> "01"
+                                    const months = {Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12'};
+                                    const month = months[monthStr];
+                                    if (month) {
+                                        dateStr = `${year}-${month}-${day.padStart(2, '0')}`;
+                                    }
                                 }
-                            }
 
-                            // Strategy 2: Fallback to JS Date if regex fails (simplified)
-                            if (!dateStr) {
-                                 const d = new Date(rawDate);
-                                 if (!isNaN(d)) {
-                                     // Use YYYY-MM-DD from the parsed date (WARNING: Timezone shift possibility if env is UTC)
-                                     dateStr = d.toISOString().split('T')[0];
-                                 }
-                            }
+                                // Strategy 2: Fallback to JS Date if regex fails (simplified)
+                                if (!dateStr) {
+                                     const d = new Date(rawDate);
+                                     if (!isNaN(d)) {
+                                         // Use YYYY-MM-DD from the parsed date (WARNING: Timezone shift possibility if env is UTC)
+                                         dateStr = d.toISOString().split('T')[0];
+                                     }
+                                }
 
-                            if (dateStr) {
-                                this.log(`Adding Read Date: ${dateStr}`, 'info');
-                                await this.addReadDate(userBookId, dateStr);
+                                if (dateStr) {
+                                    this.log(`Adding Read Date: ${dateStr}`, 'info');
+                                    await this.addReadDate(userBookId, dateStr);
+                                } else {
+                                    this.log(`Could not parse date: '${rawDate}'`, 'warn');
+                                }
                             } else {
-                                this.log(`Could not parse date: '${rawDate}'`, 'warn');
+                                this.log(`No date found for '${entry.title}' (read_at and date_added both empty)`, 'warn');
                             }
-                        } else {
-                            this.log(`No date found for '${entry.title}' (read_at and date_added both empty)`, 'warn');
                         }
                     } else {
                         this.log(`❌ Failed to add: ${entry.title}`, 'error');
@@ -321,23 +357,43 @@ export class SyncEngine {
         }
     }
 
-    async getHardcoverLibraryIds() {
-        const query = `query GetMyBooks { me { user_books(where: {status_id: {_eq: 3}}) { book { id title editions { isbn_10 isbn_13 } } } } }`;
+    async resolveListId(slug) {
+        const query = `query MyLists { me { lists { id slug } } }`;
         const res = await this.graphqlQuery(query);
+        const lists = res.data.me?.[0]?.lists || [];
+        const match = lists.find(l => l.slug === slug);
+        return match ? match.id : null;
+    }
+
+    collectBookRefs(books) {
         const bookIds = new Set();
         const existingIsbns = new Set();
         const existingTitles = new Set();
-        
-        const userBooks = res.data.me?.[0]?.user_books || [];
-        userBooks.forEach(ub => {
-            bookIds.add(ub.book.id);
-            existingTitles.add(ub.book.title.trim().toLowerCase());
-            if (ub.book.editions) ub.book.editions.forEach(ed => {
+
+        books.forEach(book => {
+            if (!book) return;
+            bookIds.add(book.id);
+            existingTitles.add(book.title.trim().toLowerCase());
+            (book.editions || []).forEach(ed => {
                 if (ed.isbn_10) existingIsbns.add(ed.isbn_10);
                 if (ed.isbn_13) existingIsbns.add(ed.isbn_13);
             });
         });
         return { bookIds, existingIsbns, existingTitles };
+    }
+
+    async getExistingBookIds() {
+        if (this.target.type === 'list') {
+            const query = `query ListBooks($id: Int!) { lists(where: {id: {_eq: $id}}) { list_books { book { id title editions { isbn_10 isbn_13 } } } } }`;
+            const res = await this.graphqlQuery(query, { id: this.listId });
+            const listBooks = res.data.lists?.[0]?.list_books || [];
+            return this.collectBookRefs(listBooks.map(lb => lb.book));
+        }
+
+        const query = `query GetMyBooks($statusId: Int!) { me { user_books(where: {status_id: {_eq: $statusId}}) { book { id title editions { isbn_10 isbn_13 } } } } }`;
+        const res = await this.graphqlQuery(query, { statusId: this.target.statusId });
+        const userBooks = res.data.me?.[0]?.user_books || [];
+        return this.collectBookRefs(userBooks.map(ub => ub.book));
     }
 
     async searchHardcoverBookId(title, author, isbn) {
@@ -376,10 +432,10 @@ export class SyncEngine {
         return finalist.length ? finalist[0].id : null;
     }
 
-    async addBookToHardcover(bookId, rating, readAt) {
-        const mutation = `mutation AddUserBook($book_id: Int!, $rating: numeric) { insert_user_book(object: { book_id: $book_id, status_id: 3, rating: $rating }) { id error } }`;
-        const res = await this.graphqlQuery(mutation, { book_id: bookId, rating: rating ? parseInt(rating) : null });
-        
+    async addUserBook(bookId, statusId, rating) {
+        const mutation = `mutation AddUserBook($book_id: Int!, $status_id: Int!, $rating: numeric) { insert_user_book(object: { book_id: $book_id, status_id: $status_id, rating: $rating }) { id error } }`;
+        const res = await this.graphqlQuery(mutation, { book_id: bookId, status_id: statusId, rating: rating ? parseInt(rating) : null });
+
         const data = res.data.insert_user_book;
         if (data && data.error) {
              if (data.error.includes("Uniqueness violation")) {
@@ -389,8 +445,14 @@ export class SyncEngine {
              }
              return null;
         }
-        
+
         return data?.id;
+    }
+
+    async addBookToList(bookId, listId) {
+        const mutation = `mutation AddListBook($book_id: Int!, $list_id: Int!) { insert_list_book(object: { book_id: $book_id, list_id: $list_id }) { id } }`;
+        const res = await this.graphqlQuery(mutation, { book_id: bookId, list_id: listId });
+        return !!res.data.insert_list_book?.id;
     }
 
     async addReadDate(userBookId, finishedAt) {
