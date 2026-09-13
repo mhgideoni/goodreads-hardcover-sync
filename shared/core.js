@@ -457,13 +457,9 @@ export class SyncEngine {
         const searchAndVerify = async (searchTitle, sourceLabel) => {
             const query = `query SearchBooks($title: String!) { books(where: {title: {_eq: $title}}, limit: 50, order_by: {users_count: desc}) { id title users_count contributions { author { name } } } }`;
             const res = await this.graphqlQuery(query, { title: searchTitle });
-            const books = res.data.books || [];
-            this.log(`[SearchDebug] ${sourceLabel} title="${searchTitle}" -> ${books.length} title matches`, 'debug');
-            books.forEach(bk => {
+            (res.data.books || []).forEach(bk => {
                  let authors = (bk.contributions || []).map(c => c.author?.name).filter(n => n);
-                 const matched = authors.some(ba => Utils.tokenSortRatio(author, ba) > 70);
-                 this.log(`[SearchDebug]   id=${bk.id} hcTitle="${bk.title}" hcAuthors=[${authors.join(', ')}] vs grAuthor="${author}" -> ${matched ? 'MATCH' : 'no match'}`, 'debug');
-                 if (matched) {
+                 if (authors.some(ba => Utils.tokenSortRatio(author, ba) > 70)) {
                      if (!candidates[bk.id]) candidates[bk.id] = { ...bk, match_source: sourceLabel };
                  }
             });
