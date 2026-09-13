@@ -8,13 +8,20 @@ const DRY_RUN = !process.argv.includes('--live');
 const GOODREADS_PLATFORM_ID = 1;
 const CURRENTLY_READING_STATUS_ID = 2;
 
-async function gql(query, variables) {
+async function gql(query, variables, retries = 3) {
     const authHeader = HC_TOKEN.startsWith('Bearer ') ? HC_TOKEN : `Bearer ${HC_TOKEN}`;
     const res = await fetch(ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: authHeader },
         body: JSON.stringify({ query, variables })
     });
+    if (res.status === 429) {
+        if (retries > 0) {
+            await new Promise(r => setTimeout(r, 3000));
+            return gql(query, variables, retries - 1);
+        }
+        throw new Error('429 Throttled (Max Retries)');
+    }
     if (!res.ok) throw new Error(`API Error ${res.status}: ${res.statusText}`);
     const json = await res.json();
     if (json.errors) throw new Error('GraphQL Error: ' + JSON.stringify(json.errors));
