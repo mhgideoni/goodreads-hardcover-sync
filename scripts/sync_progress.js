@@ -55,7 +55,7 @@ function parseProgressUpdates(xmlText) {
 
 async function resolveBookMapping(goodreadsBookId) {
     const data = await gql(
-        `query Map($id: String!) { book_mappings(where: {platform_id: ${GOODREADS_PLATFORM_ID}, external_id: {_eq: $id}}, limit: 1) { book_id edition_id } }`,
+        `query Map($id: String!) { book_mappings(where: {platform_id: {_eq: ${GOODREADS_PLATFORM_ID}}, external_id: {_eq: $id}}, limit: 1) { book_id edition_id } }`,
         { id: goodreadsBookId }
     );
     return data.book_mappings?.[0] || null;
