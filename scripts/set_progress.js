@@ -27,12 +27,26 @@ async function main() {
                     user_book_reads { id progress_pages started_at finished_at }
                 }
             }
-            books(where: {id: {_eq: ${BOOK_ID}}}) { id title pages default_physical_edition_id editions { id pages } }
         }
     `;
     const data = await gql(query);
-    console.log('Existing user_book:', JSON.stringify(data.me?.[0]?.user_books, null, 2));
-    console.log('Book info:', JSON.stringify(data.books, null, 2));
+    const userBook = data.me?.[0]?.user_books?.[0];
+    console.log('Existing user_book:', JSON.stringify(userBook, null, 2));
+
+    const editionPages = 336; // edition_id 30448268, already confirmed via prior diagnostic run
+    const targetPages = Math.round(PROGRESS_FRACTION * editionPages);
+    const existingRead = userBook.user_book_reads?.[0];
+
+    if (!existingRead) {
+        console.error('No existing user_book_read row found — expected one to update.');
+        process.exit(1);
+    }
+
+    const result = await gql(
+        `mutation UpdateProgress($id: Int!, $object: DatesReadInput!) { update_user_book_read(id: $id, object: $object) { id } }`,
+        { id: existingRead.id, object: { progress_pages: targetPages } }
+    );
+    console.log(`✅ Updated progress: ${existingRead.progress_pages} -> ${targetPages} pages (${Math.round(PROGRESS_FRACTION * 100)}% of ${editionPages})`, result);
 }
 
 main().catch(e => { console.error('Critical Error:', e); process.exit(1); });
